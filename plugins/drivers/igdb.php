@@ -59,7 +59,7 @@ if (isset($_GET["igdb"])) {
 
 		function query($query, $unbuffered = false) {
 			if (preg_match('~^SELECT COUNT\(\*\) FROM (\w+)( WHERE ((MATCH \(search\) AGAINST \((.+)\))|.+))?$~', $query, $match)) {
-				return new Result(array($this->request("$match[1]/count", ($match[5] ? 'search "' . addcslashes($match[5], '\\"') . '";'
+				return new Result(array($match[1] == 'dumps' ? array('count' => 50) : $this->request("$match[1]/count", ($match[5] ? 'search "' . addcslashes($match[5], '\\"') . '";'
 					: ($match[3] ? 'where ' . str_replace(' AND ', ' & ', $match[3]) . ';'
 					: ''
 				)))));
@@ -211,6 +211,23 @@ if (isset($_GET["igdb"])) {
 					});
 				}
 			}
+
+			$this->tables['dumps'] = array(
+				'Name' => 'dumps',
+				'Engine' => 'dumps',
+				'Comment' => 'Daily updated CSV Data Dumps which can be used to kick start your projects or keep your data up to date (within 24 hours)',
+			);
+			$this->links['data-dumps'] = 'dumps';
+			$this->fields['dumps'] = array(
+				's3_url' => array('comment' => 'The download Url is a presigned S3 url that is valid for 5 minutes'),
+				'endpoint' => array(),
+				'file_name' => array(),
+				'size_bytes' => array(),
+				'updated_at' => array('full_type' => 'datetime'),
+				'schema_version' => array('full_type' => 'datetime', 'comment' => 'Will change when the schema changes'),
+				'schema' => array('comment' => 'Reflects the current data structure and data type that the Dump is using'),
+			);
+
 			$this->tables['webhooks'] = array(
 				'Name' => 'webhooks',
 				'Engine' => 'webhooks',
@@ -262,7 +279,8 @@ if (isset($_GET["igdb"])) {
 			}
 			$columns = ($select != array('*') ? $select : array_keys($this->fields[$table]));
 			$common = ($where ? "\nwhere " . implode(" & ", $where) . ";" : "");
-			if ($table != 'webhooks') {
+			$method = ($table == 'webhooks' || $table == 'dumps' ? 'GET' : 'POST');
+			if ($method == 'POST') {
 				$query .= "fields " . implode(",", $select) . ";"
 					. ($select == array('*') ? "\nexclude checksum;" : "")
 					. $common
@@ -272,12 +290,11 @@ if (isset($_GET["igdb"])) {
 				;
 			}
 			$start = microtime(true);
-			$multi = (!$search && $table != 'webhooks' && array_key_exists($table, driver()->tables));
-			$method = ($table == 'webhooks' ? 'GET' : 'POST');
+			$multi = (!$search && $method == 'POST' && array_key_exists($table, driver()->tables));
 			$realQuery = str_replace("*;\nexclude checksum", implode(',', $columns), $query); // exclude deprecated columns
 			$return = ($multi
 				? $this->conn->request('multiquery', "query $table \"result\" { $realQuery };\nquery $table/count \"count\" { $common };")
-				: $this->conn->request($table, $realQuery, $method)
+				: $this->conn->request(($method == 'GET' && $where ? "$table/" . reset($_GET["where"]) : $table), $realQuery, $method)
 			);
 			if ($print) {
 				echo adminer()->selectQuery("$method $table;\n$query", $start);
@@ -287,7 +304,9 @@ if (isset($_GET["igdb"])) {
 			}
 			$this->foundRows = ($multi ? $return[1]['count'] : null);
 			$return = ($multi ? $return[0]['result'] : $return);
-			if ($return && $table != 'webhooks') {
+			if ($table == 'dumps' && $where) {
+				$return = array($return);
+			} elseif ($return && $method == 'POST') {
 				$return[0] = array_merge(array_fill_keys($columns, null), $return[0]);
 			}
 			return new Result($return);
@@ -349,7 +368,7 @@ if (isset($_GET["igdb"])) {
 	}
 
 	function indexes($table, $connection2 = null) {
-		$return = array(array("type" => "PRIMARY", "columns" => array("id")));
+		$return = array(array('type' => 'PRIMARY', 'columns' => array($table == 'dumps' ? 'endpoint' : 'id')));
 		if (in_array($table, array('characters', 'collections', 'games', 'platforms', 'themes'))) { // https://api-docs.igdb.com/#search-1
 			$return[] = array("type" => "FULLTEXT", "columns" => array("search"));
 		}
@@ -363,7 +382,7 @@ if (isset($_GET["igdb"])) {
 			$return[$key] = $val + array(
 				"field" => $key,
 				"type" => ($type == 'reference' ? 'int' : $type), // align right reference columns
-				"privileges" => array("select" => 1) + ($table == 'webhooks' ? array() : array("where" => 1, "order" => 1)),
+				"privileges" => array("select" => 1) + ($table == 'webhooks' || $table == 'dumps' ? array() : array("where" => 1, "order" => 1)),
 			);
 		}
 		return $return;
